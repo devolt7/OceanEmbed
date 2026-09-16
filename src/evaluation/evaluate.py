@@ -156,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if use_deep:
         pred = mlp.predict(scaler.transform(X), verbose=0)
+        if meta_path.exists():
+            target_mean = np.asarray(meta.get("targets_mean", []), dtype=float)
+            if target_mean.size == Y.shape[1]:
+                pred = pred + target_mean  # model predicts centred targets
         outputs["pred"]["mlp"] = pred
         for i, t in enumerate(targets):
             m = metrics(Y[:, i], pred[:, i])

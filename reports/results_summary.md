@@ -16,12 +16,12 @@ model    depth_m  rmse   mae    r2
   xgb  temp_200m 1.158 0.831 0.632
   xgb  temp_500m 0.406 0.286 0.898
   xgb temp_1000m 0.211 0.169 0.955
-  mlp    temp_0m 0.851 0.637 0.744
-  mlp   temp_50m 1.307 0.989 0.650
-  mlp  temp_100m 1.762 1.356 0.289
-  mlp  temp_200m 1.064 0.852 0.689
-  mlp  temp_500m 0.380 0.299 0.911
-  mlp temp_1000m 0.314 0.257 0.902
+  mlp    temp_0m 0.290 0.210 0.970
+  mlp   temp_50m 0.887 0.639 0.839
+  mlp  temp_100m 1.715 1.290 0.326
+  mlp  temp_200m 1.154 0.837 0.635
+  mlp  temp_500m 0.400 0.269 0.901
+  mlp temp_1000m 0.203 0.164 0.959
 
 These are fully real-data results: no synthetic training samples anywhere. The surface feature set is the one present after ingestion (lat, lon, month, sst, ssh, sss); missing optional sources (SSH/SSS) simply drop out of the features (documented degraded mode).
 
