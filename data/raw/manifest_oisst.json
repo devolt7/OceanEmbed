@@ -1,0 +1,23 @@
+{
+  "status": "downloaded",
+  "source": "NOAA OISST v2.1 daily (ERDDAP griddap)",
+  "file": "data/cached/oisst_sst.nc",
+  "url": "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc?sst[(2024-09-01T00:00:00Z):(2025-09-30T00:00:00Z)][(0.0):(0.0)][(5.0):(25.0)][(55.0):(95.0)]",
+  "variable": "sst",
+  "n_time": 394,
+  "shape": [
+    394,
+    1,
+    81,
+    161
+  ],
+  "time_first": "2024-09-01T12:00:00.000000000",
+  "time_last": "2025-09-30T12:00:00.000000000",
+  "lat_min": 5.125,
+  "lat_max": 25.125,
+  "lon_min": 55.125,
+  "lon_max": 95.125,
+  "units": "degree_C",
+  "updated_utc": "2026-09-16T18:33:58",
+  "note": "compressed offline snapshot of the downloaded archive (zlib)"
+}

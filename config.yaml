@@ -1,0 +1,104 @@
+# OceanEmbed — central configuration
+# All scoping (region, time, depths, hyperparameters) is config-driven, never hardcoded.
+
+project:
+  name: OceanEmbed
+  problem_id: SIH26066
+
+# ---------------------------------------------------------------------------
+# Regional + temporal scope (MVP: Arabian Sea + Bay of Bengal, 0-25 N, 50-100 E)
+# NOTE: the repository ships with a 5-year window, but the quick-start/default
+# smoke run uses a shorter recent window (see config.bootstrap.yaml) so a free
+# Colab session or laptop can reproduce the whole pipeline quickly.
+# ---------------------------------------------------------------------------
+region:
+  north: 25.0
+  south: 0.0
+  east: 100.0
+  west: 50.0
+
+time_range:
+  start: "2021-01-01"
+  end: "2025-12-31"
+
+# Standard depth levels used as regression targets (metres below surface)
+depths:
+  target_levels: [0, 50, 100, 200, 500, 1000]
+  min_profile_depth_m: 500.0   # drop Argo profiles that do not reach this depth
+
+paths:
+  raw_dir: "data/raw"
+  interim_dir: "data/interim"
+  processed_dir: "data/processed"
+  model_dir: "models"
+  report_dir: "reports"
+  figure_dir: "reports/figures"
+  cached_dir: "data/cached"   # committed offline snapshots (CMEMS SSH / SMAP SSS) for the demo
+
+# ---------------------------------------------------------------------------
+# Collocation engine
+# ---------------------------------------------------------------------------
+collocation:
+  temporal_window_days: 2    # float time must fall within +/- this many days of a surface snapshot
+  max_distance_km: 100.0     # nearest-grid-cell match beyond this radial distance is rejected
+  surface_padding_deg: 1.0   # expand the surface-subset box by this many degrees so shoreline cells match
+  require_sst: true          # SST from OISST is the mandatory surface feature
+
+# ---------------------------------------------------------------------------
+# Model training
+# ---------------------------------------------------------------------------
+model:
+  random_state: 42
+  val_fraction: 0.15
+  test_fraction: 0.15
+  features: ["lat", "lon", "month", "sst"]  # extended automatically with ssh/sss when available
+  features_optional: ["ssh", "sss"]
+
+  rf:
+    n_estimators: 300
+    max_depth: 18
+    min_samples_leaf: 2
+    n_jobs: -1
+
+  xgb:
+    n_estimators: 300
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+  mlp:
+    hidden_units: [128, 64]
+    activation: "relu"
+    dropout: 0.05
+    epochs: 250
+    batch_size: 32
+    learning_rate: 0.0005
+    patience: 40
+
+# ---------------------------------------------------------------------------
+# Data sources
+# ---------------------------------------------------------------------------
+ingestion:
+  argo:
+    backend: "argopy"          # "argopy" (default) | "argovis" (HTTP fallback)
+    server: "https://data-argo.ifremer.fr"
+  oisst:
+    erddap_url: "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc"
+    variable: "sst"            # degrees Celsius
+    time_since: "seconds since 1970-01-01 00:00:00"
+  copernicus:
+    dataset_id: "cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0_25deg_P1D"
+    variable: "sla"            # sea level anomaly, metres
+  smap:
+    provider: "PODAAC"
+    dataset_id: "SMAP_L3_SSS_SCI"
+    variable: "sss"
+    short_name: "SMAP_L3_SSS_SCI"
+
+# ---------------------------------------------------------------------------
+# Evaluation / demo
+# ---------------------------------------------------------------------------
+evaluation:
+  n_sample_profiles: 5
+  argo_recent_months: 13      # how many recent months of Argo to cache for the Streamlit overlay

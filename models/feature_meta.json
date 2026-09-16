@@ -1,0 +1,35 @@
+{
+  "features": [
+    "lat",
+    "lon",
+    "month",
+    "sst",
+    "ssh",
+    "sss"
+  ],
+  "targets": [
+    "temp_0m",
+    "temp_50m",
+    "temp_100m",
+    "temp_200m",
+    "temp_500m",
+    "temp_1000m"
+  ],
+  "n_train": 2258,
+  "n_val": 440,
+  "n_test": 523,
+  "surface_sources": [
+    "sst",
+    "ssh",
+    "sss"
+  ],
+  "trained_utc": "2026-09-16T19:46:37",
+  "targets_mean": [
+    28.9256,
+    26.693,
+    23.0808,
+    16.664,
+    11.5592,
+    7.8517
+  ]
+}

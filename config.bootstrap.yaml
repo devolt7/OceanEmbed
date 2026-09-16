@@ -1,0 +1,86 @@
+# OceanEmbed — bootstrap / quick-start config used by the default smoke run.
+# Identical semantics to config.yaml but with a SHORT time window so the full
+# pipeline (ingestion -> collocation -> training -> evaluation) can be reproduced
+# in minutes on a free-tier laptop or Colab CPU/GPU.
+# Override to the full 5-year window by passing --config config.yaml.
+
+project:
+  name: OceanEmbed
+  problem_id: SIH26066
+
+region:
+  north: 25.0
+  south: 5.0
+  east: 95.0
+  west: 55.0
+
+# 13 months (keeps OISST download small while still capturing a full seasonal cycle)
+time_range:
+  start: "2024-09-01"
+  end: "2025-09-30"
+
+depths:
+  target_levels: [0, 50, 100, 200, 500, 1000]
+  min_profile_depth_m: 500.0
+
+paths:
+  raw_dir: "data/raw"
+  interim_dir: "data/interim"
+  processed_dir: "data/processed"
+  model_dir: "models"
+  report_dir: "reports"
+  figure_dir: "reports/figures"
+  cached_dir: "data/cached"   # committed offline snapshots (CMEMS SSH / SMAP SSS) for the demo
+
+collocation:
+  temporal_window_days: 2
+  max_distance_km: 100.0
+  surface_padding_deg: 1.0
+  require_sst: true
+
+model:
+  random_state: 42
+  val_fraction: 0.15
+  test_fraction: 0.15
+  features: ["lat", "lon", "month", "sst"]
+  features_optional: ["ssh", "sss"]
+  rf:
+    n_estimators: 200
+    max_depth: 12
+    min_samples_leaf: 2
+    n_jobs: -1
+  xgb:
+    n_estimators: 200
+    max_depth: 5
+    learning_rate: 0.08
+    subsample: 0.8
+    colsample_bytree: 0.8
+  mlp:
+    hidden_units: [128, 64]
+    activation: "relu"
+    dropout: 0.05
+    epochs: 250
+    batch_size: 32
+    learning_rate: 0.0005
+    patience: 40
+
+ingestion:
+  argo:
+    backend: "argopy"
+    server: "https://data-argo.ifremer.fr"
+  oisst:
+    erddap_url: "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc"
+    variable: "sst"
+    time_since: "seconds since 1970-01-01 00:00:00"
+  copernicus:
+    dataset_id: "cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0_25deg_P1D"
+    variable: "sla"
+  smap:
+    provider: "PODAAC"
+    dataset_id: "SMAP_L3_SSS_SCI"
+    variable: "sss"
+    short_name: "SMAP_L3_SSS_SCI"
+
+evaluation:
+  n_sample_profiles: 5
+  argo_recent_months: 13

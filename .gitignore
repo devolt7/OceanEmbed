@@ -1,0 +1,47 @@
+# --- secrets / local env ---
+.env
+*.env.local
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- data (regenerable via ingestion scripts) ---
+data/raw/*.nc
+data/raw/*.parquet
+data/interim/*.parquet
+data/processed/*.json
+data/processed/*.csv
+# --- committed offline snapshot (needed for the Cloud demo) ---
+!data/cached/*.nc
+data/cached/*.json
+!data/interim/collocated.parquet
+!data/interim/collocation_report.csv
+!data/processed/surface_sst_latest.parquet
+!data/processed/surface_ssh_latest.parquet
+!data/processed/surface_sss_latest.parquet
+
+# --- model artifacts (regenerate via `python -m src.models.train`) ---
+models/*.joblib
+models/*.pkl
+models/config_snapshot.yaml
+# --- committed runtime model + metadata (needed for the Cloud demo) ---
+!models/deep_mlp.keras
+!models/scaler_input.joblib
+!models/feature_meta.json
+
+# --- evaluation outputs (regenerate via evaluate.py) ---
+reports/*.csv
+!reports/.gitkeep
+
+# --- misc ---
+*.log
+.DS_Store
+.TMP

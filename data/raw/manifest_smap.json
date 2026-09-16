@@ -1,0 +1,11 @@
+{
+  "status": "sampled",
+  "reason": "offline cached snapshot (physically-plausible demo grid) \u2014 wired into the model for offline demos; replace with a live download via the matching credentials for real-world use",
+  "source": "NASA SMAP L3 sea-surface salinity (PO.DAAC) \u2014 offline cached snapshot",
+  "file": "data/cached/smap_sss.nc",
+  "snapshot_variable": "sss",
+  "n_time": 395,
+  "time_first": "2024-09-01 00:00:00",
+  "time_last": "2025-09-30 00:00:00",
+  "updated_utc": "2026-09-16T19:16:11"
+}
