@@ -1,0 +1,29 @@
+name: smoke
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: Install + boot the deployed app
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install runtime requirements (same as Streamlit Cloud)
+        run: pip install -r requirements.txt
+
+      - name: Boot map view + profile view, exercise inference/replay/baselines
+        run: python scripts/smoke_test.py
