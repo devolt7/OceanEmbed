@@ -1,13 +1,14 @@
-"""Shared offline analysis powering the demo.
+"""Shared analysis powering the demo.
 
-Everything here runs from committed / cached artifacts (parquet splits, netCDF grid
-archives, the trained model) so the app never needs the network at runtime:
+These helpers work on whichever data the app provides — freshly-fetched live series
+when the network is up, or the committed offline snapshot as a quiet fallback:
 
 - monthly climatology (mean + std per depth) from collocated Argo profiles,
 - a simple multi-output linear-regression baseline on the same features,
 - an RMSE comparison of MLP vs baselines against held-out Argo profiles,
 - thermocline depth (steepest temperature drop between standard levels),
-- per-location monthly replay predictions from the cached satellite grid series.
+- per-location monthly replay predictions from a satellite grid archive
+  (live rolling window by default, cached snapshot as fallback).
 """
 
 from __future__ import annotations
@@ -146,18 +147,26 @@ def thermocline_depth(temps, depths) -> float | None:
 _VAR_ALIAS = {"sst": "sst", "ssh": "sla", "sss": "sss"}
 
 
-def cached_surface_file(cfg: dict, feat: str) -> Path | None:
-    """Find the committed / cached netCDF grid archive for one surface feature."""
-    cached = resolve_path(cfg, "cached_dir")
+def cached_surface_file(cfg: dict, feat: str, archive_dir: Path | str | None = None) -> Path | None:
+    """Find the netCDF grid archive for one surface feature.
+
+    ``archive_dir`` (when given) is the active live-fetch directory so the replay reads
+    the most recent series instead of the committed snapshot; otherwise the committed
+    cached archives -- and then the raw manifest file -- are used as a quiet fallback.
+    """
     if feat == "sst":
-        cands: list[Path | None] = [cached / "oisst_sst.nc"]
+        cands = [Path(archive_dir) / "oisst_sst.nc"] if archive_dir else []
+        cached = resolve_path(cfg, "cached_dir")
+        cands += [cached / "oisst_sst.nc"]
         man = read_manifest(cfg, "oisst")
         if man:
             cands.append(manifest_file_path(cfg, man))
     elif feat == "ssh":
-        cands = [cached / "cmems_ssh.nc"]
+        cands = [Path(archive_dir) / "cmems_ssh.nc"] if archive_dir else []
+        cands += [resolve_path(cfg, "cached_dir") / "cmems_ssh.nc"]
     elif feat == "sss":
-        cands = [cached / "smap_sss.nc"]
+        cands = [Path(archive_dir) / "smap_sss.nc"] if archive_dir else []
+        cands += [resolve_path(cfg, "cached_dir") / "smap_sss.nc"]
     else:
         cands = []
     for p in cands:
@@ -200,23 +209,26 @@ def surface_monthly_series(path: Path, var: str, lat: float, lon: float,
 
 
 def replay_monthly(cfg: dict, meta: dict, scaler, mlp, lat: float, lon: float,
-                   n_last: int = 12) -> dict | None:
-    """Predicted 0–1000 m profiles for the last ``n_last`` months at (lat, lon).
+                   n_last: int = 12, archive_dir: Path | str | None = None) -> dict | None:
+    """Predicted 0–1000 m profiles for the most recent ``n_last`` months at (lat, lon).
 
-    Reads each surface feature's full daily series from the cached netCDF archives,
-    aggregates to monthly means, and predicts one profile per available month.
+    Reads each surface feature's full daily series from the active grid archives
+    (live rolling window when ``archive_dir`` is provided, otherwise the cached
+    snapshot), aggregates to monthly means, and predicts one profile per available
+    month. Months are **bounded to end at the current calendar month** so the charts
+    always track the present instead of a hardcoded past range.
 
     Returns ``{"months", "pred", "gaps"}`` — ``months`` are month-start timestamps,
     ``pred`` is (n_months, n_targets) and ``gaps`` lists months present in the archive
     window but without enough valid data (nothing is ever faked). Returns None if any
-    required surface feature has no cached archive or the clicked point is land.
+    required surface feature has no archive or the clicked point is land.
     """
     feat_cols = meta["features"]
     surface_feats = [f for f in feat_cols if f not in ("lat", "lon", "month")]
 
     series: dict[str, pd.Series] = {}
     for feat in surface_feats:
-        path = cached_surface_file(cfg, feat)
+        path = cached_surface_file(cfg, feat, archive_dir=archive_dir)
         if path is None:
             continue
         try:
@@ -239,7 +251,18 @@ def replay_monthly(cfg: dict, meta: dict, scaler, mlp, lat: float, lon: float,
     frame = pd.DataFrame(series).reindex(all_months)
     complete = frame.dropna()
     gaps = [pd.Timestamp(t) for t in all_months if t not in complete.index]
-    frame = complete.sort_index().tail(n_last)
+    frame = complete.sort_index()
+
+    # Bound to the trailing window relative to TODAY so the charts never show a stale
+    # hardcoded range (e.g. a fixed 2024-2025 slice on a machine in 2026). When the
+    # active archive itself is stale (an old offline snapshot), fall back to its newest
+    # available months instead of blanking the chart.
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    first_month = now.to_period("M") - (n_last - 1)
+    if frame.index.max() >= first_month.start_time:
+        frame = frame[frame.index >= first_month.start_time].tail(n_last)
+    else:
+        frame = frame.tail(n_last)
     if frame.empty:
         return None
 

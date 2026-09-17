@@ -87,6 +87,12 @@ ingestion:
     erddap_url: "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc"
     variable: "sst"            # degrees Celsius
     time_since: "seconds since 1970-01-01 00:00:00"
+    # Mirrors tried in order by the live refresh (upwell redirects data to coastwatch,
+    # so reachability can vary by network; NCEI is the authoritative NOAA host).
+    mirrors:
+      - "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc"
+      - "https://upwell.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc"
+      - "https://www.ncei.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc"
   copernicus:
     dataset_id: "cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0_25deg_P1D"
     variable: "sla"            # sea level anomaly, metres

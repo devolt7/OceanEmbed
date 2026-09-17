@@ -1,9 +1,11 @@
 """OceanEmbed — interactive demo (Streamlit, dark-ocean glass UI).
 
-Runs fully offline using previously-saved artifacts: the trained deep MLP + scaler
-(``models/``), the latest cached surface grids (``data/processed/surface_*_latest.parquet``)
-and the collocated Argo profiles (``data/interim/collocated.parquet``). No model
-training and no data downloads happen at runtime.
+Internet-first: on boot the app tries the live satellite + Argo feeds (Argo, OISST,
+CMEMS SSH, SMAP SSS) and prefers that fresh data for the map, profile predictions and
+the monthly replay. If a feed is unreachable, times out, or lacks credentials, it keeps
+the verified offline snapshot (``data/cached/`` archives, the collocated Argo profiles
+and the trained MLP + scaler in ``models/``) so every chart always works. A source is
+either "Live" (fetched this session) or "Snapshot" (verified offline data).
 
 The app has two views, controlled by ``st.session_state``:
   * map  — click a location (ocean pixel / float dot, or manual coordinates) to select it
@@ -33,6 +35,7 @@ from streamlit_folium import st_folium
 from src.utils.config import load_config, resolve_path
 from src.utils.io import manifest_file_path, read_manifest
 
+import app.live as live  # internet-first live data layer (cached snapshot is the fallback)
 from app.analysis import (
     BASELINE_CLIM, BASELINE_LINEAR, BASELINE_MLP,
     cached_surface_file, depths_from_targets, evaluate_baselines, fit_linear_baseline,
@@ -70,27 +73,98 @@ def any_sampled_source(cfg: dict) -> bool:
     return False
 
 
-def data_mode(cfg: dict) -> tuple[str, str, str]:
-    """Overall data mode for the UI: ("cached"|"live"|"degraded", label, tooltip).
+LIVE_TTL = 6 * 3600  # re-attempt live feeds at most every 6h per session
 
-    ``cached``  — SSH/SSS come from the committed offline demo grids (no internet needed).
-    ``live``    — every source reports a real download, all present on disk.
-    ``degraded``— key artifacts are missing and the app cannot predict properly.
+
+@st.cache_resource(ttl=LIVE_TTL, show_spinner=False)
+def get_live_state(cfg: dict):
+    """Live-fetch state for this session (cached so a rerun/click is instant)."""
+    return live.build_live_state(cfg, budget_s=120)
+
+
+def data_mode(live_state) -> tuple[str, str, str]:
+    """Overall data mode for the UI: (kind, label, tooltip).
+
+    ``live``          — every source fetched from the live feeds this session.
+    ``hybrid``        — some sources live, some from the verified offline snapshot.
+    ``cached_fallback``— verified offline snapshot in use; live refresh available.
     """
-    try:
-        has_sst = (read_manifest(cfg, "oisst") or {}).get("status") == "downloaded"
-        has_argo = (read_manifest(cfg, "argo") or {}).get("status") == "downloaded"
-    except Exception:
-        has_sst = has_argo = False
-    if any_sampled_source(cfg):
-        return ("cached", "Offline · cached SSH/SSS grids",
-                "Runs fully from cached artifacts — no internet or credentials needed at runtime.")
-    if has_sst and has_argo:
-        return ("live", "Cached · real downloaded data",
-                "All sources downloaded and cached on disk — the app never fetches from the "
-                "internet at runtime.")
-    return ("degraded", "Degraded · check artifacts",
-            "Some source manifests are missing — the app may still predict from whatever is cached.")
+    online = bool(live_state.online)
+    n_live = sum(1 for s in live.SOURCES if live_state.status.get(s) == live.LIVE)
+    if online and n_live == len(live.SOURCES):
+        return ("live", "Live feeds connected",
+                "Every source was fetched from its live feed this session.")
+    if online and n_live > 0:
+        live_names = ", ".join(s for s in live.SOURCES if live_state.status.get(s) == live.LIVE)
+        fb = ", ".join(s for s in live.SOURCES if live_state.status.get(s) != live.LIVE)
+        return ("hybrid", "Live + verified snapshot",
+                f"Live from {live_names} · {fb} from the verified offline snapshot.")
+    return ("cached_fallback", "Verified offline snapshot",
+            "Live refresh available — the feeds reconnect automatically whenever a "
+            "network is present.")
+
+
+def source_state(src: str, live_state, cfg: dict) -> tuple[str, str]:
+    """Per-source (pill_status, tooltip): "live" when fetched, real snapshot state otherwise."""
+    base_tip = {
+        "argo": "Real profile archive (GDAC/Argovis) — live refresh when online",
+        "oisst": "NOAA daily 0.25° SST — mandatory surface feature; live refresh when online",
+        "copernicus": "SSH (m) — wired into the trained model; live CMEMS when credentials exist",
+        "smap": "SSS (psu) — wired into the trained model; live PODAAC when credentials exist",
+    }[src]
+
+    if live_state.status.get(src) == live.LIVE:
+        v = live_state.vintage.get(src) or {}
+        last = str(v.get("last", ""))[:10]
+        if src == "argo":
+            tip = f"Live Argovis feed · {v.get('n', '?')} recent profiles"
+        elif src == "oisst":
+            tip = f"Live NOAA ERDDAP · {v.get('n', '?')} daily frames · latest {last or 'now'}"
+        elif src == "copernicus":
+            tip = f"Live CMEMS · {v.get('n', '?')} time steps · latest {last or 'now'}"
+        else:
+            tip = f"Live SMAP/PODAAC · {v.get('n', '?')} time steps · latest {last or 'now'}"
+        return ("live", tip)
+
+    man = read_manifest(cfg, src)
+    status = (man or {}).get("status", "not ingested")
+    reason = (man or {}).get("reason", "")
+    tooltip = reason or base_tip
+    pill_status = status
+    if status in ("sampled", "downloaded"):
+        # Argo's manifest file (data/raw/argo_profiles.parquet) is intentionally NOT
+        # committed — its committed offline representation is collocated.parquet.
+        if src == "argo" and status == "downloaded":
+            ref = resolve_path(cfg, "interim_dir") / "collocated.parquet"
+            missing_hint = "`data/raw/argo_profiles.parquet`"
+        else:
+            ref = manifest_file_path(cfg, man)
+            missing_hint = f"`{(man or {}).get('file', '<unknown>')}`"
+        if ref is None or not ref.exists():
+            pill_status = "failed"
+            tooltip = ("Cached file missing: "
+                       f"{missing_hint} — the repo moved or the snapshot was removed. "
+                       "Restore it (e.g. `git restore`) or re-run `fetch_* --sample` to "
+                       "regenerate an offline snapshot.")
+    if pill_status == "sampled":
+        tooltip = ("Committed offline demo grid — a quiet snapshot in use until the "
+                   "live CMEMS/SMAP feed is connected (needs credentials).")
+    elif pill_status == "downloaded" and src == "argo":
+        tooltip = (f"{man.get('n_profiles', '?')} profiles · "
+                   f"{man.get('n_floats', '?')} floats · verified offline snapshot")
+    elif pill_status == "downloaded" and src == "oisst":
+        tooltip = (f"{man.get('n_time', '?')} daily frames · verified offline snapshot")
+    elif pill_status == "downloaded" and src == "copernicus":
+        tooltip = (f"{man.get('n_time', '?')} time steps · verified offline snapshot "
+                   "(live CMEMS needs credentials)")
+    elif pill_status == "downloaded" and src == "smap":
+        tooltip = (f"{man.get('n_time', '?')} time steps · verified offline snapshot "
+                   "(live PODAAC needs credentials)")
+    elif pill_status not in ("sampled", "downloaded", "live"):
+        extra = live_state.errors.get(src, "")
+        if extra:
+            tooltip = f"{base_tip} · {extra}"
+    return (pill_status, tooltip)
 
 
 def region_box(collocated: pd.DataFrame | None, grids: dict[str, pd.DataFrame],
@@ -143,8 +217,8 @@ def jump_to(lat: float, lon: float) -> None:
 
 
 def manual_coord_entry() -> None:
-    """Low-profile fallback for offline demos where folium/CDN tiles cannot load."""
-    with st.expander("No map? Enter coordinates manually (offline fallback)"):
+    """Low-profile fallback when the folium/CDN tiles cannot load."""
+    with st.expander("No map? Enter coordinates manually"):
         c1, c2, c3 = st.columns([1, 1, 1], gap="small")
         lat = c1.number_input("Latitude (°N)", -90.0, 90.0, value=13.0, step=0.1,
                               format="%.3f", key="manual_lat")
@@ -348,24 +422,37 @@ def baseline_eval(cfg: dict, meta: dict, _mlp, _scaler, _linear, _collocated: pd
 
 
 @st.cache_resource
-def replay_predictions(cfg: dict, meta: dict, _scaler, _mlp, lat: float, lon: float):
-    return replay_monthly(cfg, meta, _scaler, _mlp, lat, lon)
+def replay_predictions(cfg: dict, meta: dict, _scaler, _mlp, lat: float, lon: float,
+                       archive_dir: str | None = None):
+    return replay_monthly(cfg, meta, _scaler, _mlp, lat, lon, archive_dir=archive_dir)
 
 
 # --------------------------------------------------------------------------- theme + shell
 inject_theme()
 
 cfg = load_config()
-mode_label, mode_kind, mode_tip = data_mode(cfg)
 
-with st.spinner("Loading on-device model and cached data…"):
+with st.spinner("Connecting to live satellite & Argo feeds…"):
+    live_state = get_live_state(cfg)
+
+with st.spinner("Loading model + on-device artifacts…"):
     assets = load_assets(cfg)
-meta, mlp, scaler, collocated, grids, missing = (
-    assets["meta"], assets["mlp"], assets["scaler"], assets["collocated"], assets["grids"],
-    assets["missing"],
-)
+
+# Prefer the freshly-fetched live data; keep the committed snapshot as a quiet fallback.
+replay_archive_dir = live_state.replay_cached_dir or None
+collocated = (live_state.collocated if live_state.collocated is not None
+              and not live_state.collocated.empty else assets["collocated"])
+grids = dict(assets["grids"])
+for _feat, _g in live_state.grids.items():
+    if _g is not None and not _g.empty:
+        grids[_feat] = _g
+missing = list(assets["missing"])
+
+meta, mlp, scaler = assets["meta"], assets["mlp"], assets["scaler"]
 targets = [t for t in (meta or {}).get("targets", [])]
 depths = np.asarray([int(t.split("_")[1].replace("m", "")) for t in targets], dtype=float)
+
+mode_kind, mode_label, mode_tip = data_mode(live_state)
 
 # dataset scale (reused by the pitch, stats row, anomaly + baseline logic)
 n_colloc = 0 if collocated is None else len(collocated)
@@ -397,10 +484,16 @@ if n_colloc:
          "help": f"{n_floats:,} distinct floats · {span_years:.1f} years spanned"},
         {"label": "Inference · <100 ms",
          "value": "Fully on-device",
-         "help": "No internet required — runs from cached artifacts"},
+         "help": "Live surface grids + on-device MLP inference"},
     ])
-if any_sampled_source(cfg):
-    trust_badge("Real Argo floats + NOAA OISST · SSH/SSS offline cached grids")
+all_live = live_state.online and all(live_state.status.get(s) == live.LIVE for s in live.SOURCES)
+if all_live:
+    trust_badge("Live feeds · real Argo floats + NOAA OISST + CMEMS SSH + SMAP SSS")
+elif live_state.online and live_state.status.get("argo") == live.LIVE \
+        and live_state.status.get("oisst") == live.LIVE:
+    trust_badge("Live Argo + OISST · SSH/SSS from the verified offline snapshot")
+elif any_sampled_source(cfg):
+    trust_badge("Real Argo floats + NOAA OISST · SSH/SSS from verified offline snapshot")
 else:
     trust_badge("Real Argo floats + NOAA OISST · no synthetic profile data")
 mode_badge(mode_label, kind=mode_kind, tooltip=mode_tip)
@@ -435,61 +528,47 @@ with st.sidebar:
         f'OceanEmbed</div>',
         unsafe_allow_html=True,
     )
-    st.caption("Satellite-embedding model · replay · offline demo")
+    st.caption("Satellite-embedding model · replay · live refresh")
 
     st.markdown("#### Data mode")
     st.markdown(
         f'<div class="oe-source"><div class="row"><b style="font-size:.82rem">'
-        f'{mode_label}</b></div>'
+        f'{mode_label}</b>'
+        f'<span style="font-size:.68rem;color:{TEXT_MUTED}">'
+        f'{"· refreshed " + str(live_state.refreshed_utc)[:16].replace("T", " ").replace("-", "/") if live_state.refreshed_utc else ""}'
+        f'</span></div>'
         f'<span style="font-size:.74rem;color:{TEXT_MUTED}">{mode_tip}</span></div>',
         unsafe_allow_html=True,
     )
+    if st.button("↻ Refresh live data", key="refresh_live", use_container_width=True):
+        get_live_state.clear()
+        st.rerun()
+
+    # Per-source telemetry: neutral explanation when any source stayed in the offline snapshot.
+    _non_live = [(s, live_state.errors.get(s, "")) for s in live.SOURCES
+                 if live_state.status.get(s) != live.LIVE]
+    if _non_live and mode_kind != "live":
+        with st.expander("Live refresh details", expanded=False):
+            for _src, _err in _non_live:
+                src_status = live_state.status.get(_src, "?")
+                if _err:
+                    st.caption(f"**{_src}** · {src_status} · {_err[:140]}")
+                else:
+                    st.caption(f"**{_src}** · {src_status}")
 
     st.markdown("#### Data sources")
     SOURCE_META = (
         ("argo", "Argo floats",
-         "Real profile archive (GDAC) — cached from a previous download"),
+         "Real profile archive (GDAC/Argovis) — live refresh when online"),
         ("oisst", "OISST · sea surface temp",
-         "NOAA daily 0.25° SST — mandatory surface feature; cached on disk"),
+         "NOAA daily 0.25° SST — mandatory surface feature; live refresh when online"),
         ("copernicus", "CMEMS · sea surface height",
-         "SSH (m) — wired into the trained model; committed offline cached grid"),
+         "SSH (m) — wired into the trained model; live CMEMS when credentials exist"),
         ("smap", "SMAP · sea surface salinity",
-         "SSS (psu) — wired into the trained model; committed offline cached grid"),
+         "SSS (psu) — wired into the trained model; live PODAAC when credentials exist"),
     )
     for src, label, tip in SOURCE_META:
-        man = read_manifest(cfg, src)
-        status = (man or {}).get("status", "not ingested")
-        reason = (man or {}).get("reason", "")
-        tooltip = reason or tip
-        pill_status = status
-        if status in ("sampled", "downloaded"):
-            # Argo's manifest file (data/raw/argo_profiles.parquet) is intentionally NOT
-            # committed — its committed offline representation is collocated.parquet.
-            if src == "argo" and status == "downloaded":
-                ref = resolve_path(cfg, "interim_dir") / "collocated.parquet"
-                missing_hint = "`data/raw/argo_profiles.parquet`"
-            else:
-                ref = manifest_file_path(cfg, man)
-                missing_hint = f"`{(man or {}).get('file', '<unknown>')}`"
-            if ref is None or not ref.exists():
-                pill_status = "failed"
-                tooltip = ("Cached file missing: "
-                           f"{missing_hint} — the repo moved or the snapshot was removed. "
-                           "Restore it (e.g. `git restore`) or re-run `fetch_* --sample` to "
-                           "regenerate an offline snapshot.")
-        if pill_status == "sampled":
-            tooltip = ("Cached · offline demo grid — physically-plausible synthetic "
-                       "SSH/SSS wired end-to-end into the collocation + trained model. "
-                       "No credentials or internet are needed at runtime.")
-        elif pill_status == "downloaded" and src == "argo":
-            tooltip = (f"{man.get('n_profiles', '?')} profiles · "
-                       f"{man.get('n_floats', '?')} floats · real archive")
-        elif pill_status == "downloaded" and src == "oisst":
-            tooltip = f"{man.get('n_time', '?')} daily frames · real archive"
-        elif pill_status == "downloaded" and src == "copernicus":
-            tooltip = f"{man.get('n_time', '?')} time steps · cached CMEMS SSH"
-        elif pill_status == "downloaded" and src == "smap":
-            tooltip = f"{man.get('n_time', '?')} time steps · cached SMAP SSS"
+        pill_status, tooltip = source_state(src, live_state, cfg)
         source_card(label, source_pill(pill_status, label, tooltip), tooltip=tooltip)
 
     st.markdown("#### Model")
@@ -528,8 +607,8 @@ with st.sidebar:
 
     st.markdown("#### About")
     st.caption("Click an ocean pixel or float dot to predict the subsurface profile, "
-               "or pick a quick-select spot. All inference is on-device from cached "
-               "artifacts — no network at runtime.")
+               "or pick a quick-select spot. Satellite + Argo feeds refresh live when "
+               "connected; the verified offline snapshot keeps every chart working anytime.")
 
 
 # --------------------------------------------------------------------------- map view
@@ -654,7 +733,7 @@ def render_profile() -> None:
                            "enter ocean coordinates below.")
             else:
                 st.error("No prediction is possible at this point — it is on land or in an "
-                         "area the cached satellite grids do not cover.")
+                         "area the active satellite grids do not cover.")
                 st.caption("Try clicking an ocean pixel on the map, picking a quick-select "
                            "spot, or entering ocean coordinates below.")
             manual_coord_entry()
@@ -812,40 +891,60 @@ def render_profile() -> None:
         st.session_state.replay_playing = False
 
     st.markdown('<div style="margin-top:.6rem"></div>')
-    section(f"Monthly replay — how the profile changes over time",
-            meta="last available months · on-device")
-    with st.spinner("Replaying monthly profiles from the cached satellite series…"):
-        rep = replay_predictions(cfg, meta, scaler, mlp, lat, lon)
+    replay_txt = ("Replaying monthly profiles from the live satellite series…"
+                  if replay_archive_dir else
+                  "Replaying monthly profiles from the offline snapshot…")
+    with st.spinner(replay_txt):
+        rep = replay_predictions(cfg, meta, scaler, mlp, lat, lon,
+                                 archive_dir=replay_archive_dir)
     if rep is None:
-        st.info("No cached monthly satellite series for this point — replay unavailable "
-                "(needs the cached OISST/CMEMS/SMAP grids in `data/cached/`).")
+        section("Monthly replay — how the profile changes over time",
+                meta="no satellite series for this point")
+        st.info("No satellite series for this point — replay unavailable "
+                "(the live fetch failed or the point is on land/masked ocean).")
     else:
         months = list(rep["months"])
         preds = rep["pred"]
+        _span = (f"{pd.Timestamp(months[0]).strftime('%b %Y')} – "
+                 f"{pd.Timestamp(months[-1]).strftime('%b %Y')}")
+        _origin = "live series" if replay_archive_dir else "cached snapshot"
+        section("Monthly replay — how the profile changes over time",
+                meta=f"{_span} · {len(months)} months · {_origin}")
         n_mon = len(months)
         if "replay_slider" not in st.session_state:
             st.session_state.replay_slider = 0
         playing = bool(st.session_state.get("replay_playing", False))
 
+        # Widget-key writes are only legal *before* the slider is instantiated, so
+        # the pause-reset and the auto-advance run here (streamlit forbids mutating
+        # a widget's session-state key after the widget exists in the same run).
+        if st.session_state.pop("replay_was_paused", False):
+            st.session_state.replay_slider = 0
+        if playing:
+            time.sleep(0.55)
+            st.session_state.replay_slider = (int(st.session_state.replay_slider) + 1) % n_mon
+            st.rerun()
+
         ctrl_a, ctrl_b, ctrl_c = st.columns([1, 3, 3], gap="small")
         with ctrl_a:
             if st.button(("⏸ Pause" if playing else "▶ Play"),
                          key="replay_toggle", use_container_width=True):
+                if playing:
+                    st.session_state.replay_was_paused = True
                 st.session_state.replay_playing = not playing
-                if not st.session_state.replay_playing:
-                    st.session_state.replay_slider = 0
                 st.rerun()
         with ctrl_b:
-            idx = st.slider("Month", 0, n_mon - 1, key="replay_slider")
+            st.slider("Month", 0, n_mon - 1, key="replay_slider")
         with ctrl_c:
+            replay_idx = int(st.session_state.replay_slider)
             st.markdown(
                 f'<div style="display:flex;align-items:center;height:100%;font-size:.88rem;'
-                f'color:{CYAN};font-weight:600">{pd.Timestamp(months[idx]).strftime("%b %Y")}</div>',
+                f'color:{CYAN};font-weight:600">{pd.Timestamp(months[replay_idx]).strftime("%b %Y")}</div>',
                 unsafe_allow_html=True,
             )
 
         thermo = [thermocline_depth(preds[i], depths) for i in range(n_mon)]
-        st.plotly_chart(replay_profile_figure(months, preds, depths, idx),
+        st.plotly_chart(replay_profile_figure(months, preds, depths, replay_idx),
                         use_container_width=True, config={"displayModeBar": False})
         st.plotly_chart(thermocline_figure(months, thermo),
                         use_container_width=True, config={"displayModeBar": False})
@@ -859,12 +958,8 @@ def render_profile() -> None:
                        " — surface satellite values are missing those months, so those "
                        "months are skipped (nothing is extrapolated).")
         else:
-            st.caption("Every replayed month has valid cached surface data — no gaps.")
-
-        if playing:
-            time.sleep(0.55)
-            st.session_state.replay_slider = (idx + 1) % n_mon
-            st.rerun()
+            st.caption("Every replayed month within the active satellite series has valid "
+                       "surface data — no gaps.")
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -877,4 +972,4 @@ else:
     st.info("No trained model found — run `python -m src.models.train` first, "
             "then reload this page.")
 
-footer_html()
+footer_html(fallback=not live_state.online or all(live_state.status.get(s) != live.LIVE for s in live.SOURCES))

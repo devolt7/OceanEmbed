@@ -149,6 +149,107 @@ def _tidy_points(ds, source: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+ARGOVIS_API = "https://argovis-api.colorado.edu"
+ARGOVIS_PUBLIC_KEY = "guest"
+
+_DEPTH_CAP_M = float(DEFAULT_DEPTH_CAP_M)
+
+
+def _tidy_argovis_profiles(raw: list) -> pd.DataFrame:
+    """Crush the Argovis v2 ``/argo`` profile bundle into one row per profile.
+
+    Each profile stores a single list of lists ``data = [pres, temp, psal]`` plus
+    ``geolocation.coordinates = [lon, lat]``, ``timestamp`` and ``metadata`` (id).
+    Argovis occasionally reports ``null`` for a level (e.g. a bad thermistor) — those
+    are coerced to NaN and the profile is kept as long as enough valid levels remain.
+    """
+
+    def _num(x):
+        if x is None:
+            return np.nan
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return np.nan
+
+    rows = []
+    for pr in raw:
+        try:
+            data = pr.get("data") or []
+            n = min(len(v) for v in data) if data else 0
+            geo = pr.get("geolocation") or {}
+            coords = geo.get("coordinates") or [None, None]
+            meta = pr.get("metadata") or []
+            fid = meta[0] if meta else str(pr.get("_id", ""))
+            ts = pr.get("timestamp")
+        except Exception:  # noqa: BLE001
+            continue
+        if not data or not ts:
+            continue
+        pres = [_num(x) for x in (data[0][:n] if n else [])]
+        temp = [_num(x) for x in (data[1][:n] if n else [])]
+        sal = [_num(x) for x in (data[2][:n] if n else [])]
+        valid_pres = int(np.sum(np.isfinite(pres))) if pres else 0
+        valid_temp = int(np.sum(np.isfinite(temp))) if temp else 0
+        if valid_pres < 5 or valid_temp < 3:
+            continue
+        depth = _pres_to_depth_m(np.asarray(pres, dtype=float))
+        rows.append(
+            {
+                "float_id": str(fid),
+                "time": ts,
+                "lat": _num(coords[1]),
+                "lon": _num(coords[0]),
+                "depth": depth.tolist(),
+                "temperature": temp,
+                "salinity": sal,
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["float_id", "time", "lat", "lon", "depth",
+                                     "temperature", "salinity"])
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    df = df.dropna(subset=["lat", "lon"])
+    return df
+
+
+def _argovis_query_params(cfg: dict, start: str, end: str) -> dict:
+    r = cfg["region"]
+    shape = [[r["west"], r["south"]], [r["east"], r["north"]]]
+    return {
+        "data": "pressure,temperature,salinity",
+        "box": str(shape).replace(" ", ""),
+        "startDate": pd.to_datetime(start, utc=True).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "endDate": pd.to_datetime(end, utc=True).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "presRange": f"0,{int(_DEPTH_CAP_M)}",
+    }
+
+
+def fetch_profiles_argovis_api(cfg: dict, start: str, end: str,
+                               timeout_s: int = 90) -> pd.DataFrame:
+    """Live Argo profiles straight from Argovis v2 (HTTPS JSON, no login needed).
+
+    Preferred over argopy for live refreshes: single bounded request, strict timeout,
+    and no heavyweight dependencies at runtime.
+    """
+    import requests
+
+    qs = _argovis_query_params(cfg, start, end)
+    url = ARGOVIS_API + "/argo"
+    log.info("argovis-api region fetch: %s", url)
+    resp = requests.get(url, params=qs, headers={"x-argokey": ARGOVIS_PUBLIC_KEY},
+                        timeout=timeout_s)
+    resp.raise_for_status()
+    raw = resp.json()
+    if not isinstance(raw, list):
+        raise RuntimeError(f"Argovis returned unexpected payload ({type(raw).__name__})")
+    df = _tidy_argovis_profiles(raw)
+    if df.empty:
+        return df
+    return df.sort_values("time").reset_index(drop=True)
+
+
 def fetch_with_argopy(cfg: dict) -> pd.DataFrame:
     """Fetch via the argopy package (GDAC / Ifremer erddap).
 

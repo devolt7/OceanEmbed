@@ -178,13 +178,13 @@ iframe[title="streamlit_folium.st_folium"] {{ border-radius: 18px !important; }}
   border-radius: 999px; padding:.24rem .66rem; font-size:.74rem; font-weight:600; }}
 .oe-pill[title] {{ cursor: help; }}
 .oe-pill.live   {{ color:{GOOD}; background:rgba(52,211,153,.1); border:1px solid rgba(52,211,153,.35); }}
-.oe-pill.cached {{ color:{GOOD}; background:rgba(45,212,191,.09); border:1px solid rgba(45,212,191,.4); }}
+.oe-pill.cached {{ color:{CYAN}; background:rgba(34,211,238,.08); border:1px solid rgba(34,211,238,.32); }}
 .oe-pill.sample {{ color:{WARM}; background:rgba(251,191,36,.1); border:1px solid rgba(251,191,36,.38); }}
 .oe-pill.fail   {{ color:{HOT}; background:rgba(248,113,113,.1); border:1px solid rgba(248,113,113,.38); }}
 .oe-pill.off    {{ color:{TEXT_MUTED}; background:rgba(143,177,207,.08); border:1px solid rgba(143,177,207,.2); }}
 .oe-pill .dot {{ width:7px; height:7px; border-radius:50%; }}
 .oe-pill.live .dot {{ background:{GOOD}; animation: dotPulse 1.8s ease-out infinite; }}
-.oe-pill.cached .dot {{ background:{GOOD}; }}
+.oe-pill.cached .dot {{ background:{CYAN}; }}
 .oe-pill.sample .dot {{ background:{WARM}; }}
 .oe-pill.fail .dot {{ background:{HOT}; }}
 .oe-pill.off .dot {{ background:{TEXT_MUTED}; }}
@@ -288,10 +288,12 @@ def trust_badge(text: str) -> None:
 def mode_badge(text: str, *, kind: str = "cached", tooltip: str = "") -> None:
     """Centred data-mode badge shown below the hero.
 
-    ``kind`` maps to a pill style: "cached" (offline grids), "live" (real downloads),
-    or "degraded" (missing artifacts). Tooltip explains what the mode means.
+    ``kind`` maps to a pill style: "live" (real-time fetch), "cached" / "cached_fallback"
+    (offline snapshot), "hybrid" (some sources live, some cached), or "degraded".
+    Tooltip explains what the mode means.
     """
-    cls = {"cached": "cached", "live": "live", "degraded": "sample"}.get(kind, "cached")
+    cls = {"cached": "cached", "live": "live", "hybrid": "live",
+           "cached_fallback": "cached", "degraded": "sample"}.get(kind, "cached")
     tip = f' title="{_html_escape(tooltip)}"' if tooltip else ""
     st.markdown(
         f'<div style="text-align:center;margin:.2rem 0 .1rem">'
@@ -381,20 +383,23 @@ def glass_panel(html: str, *, animation: bool = True) -> None:
 def source_pill(status: str, label: str, tooltip: str = "") -> str:
     """Status pill for one data source.
 
-    ``downloaded`` -> green "Cached · downloaded"   (real data stored on disk)
-    ``sampled``    -> teal "Cached · offline grid"  (clearly-labelled demo grid,
-                       wired into the model — honest, not a claimed live link)
-    ``failed``     -> red "Failed"
-    anything else  -> muted "Available — not yet integrated" (with the reason as tooltip)
+    ``live``      -> green pulsing "Live"            (fetched from the feed this session)
+    ``cached``    -> neutral blue "Snapshot"          (verified offline snapshot; refresh available)
+    ``downloaded``-> neutral blue "Snapshot"          (committed real download, no live fetch)
+    ``sampled``   -> amber "Snapshot · demo grid"     (clearly-labelled committed demo grid)
+    ``failed``    -> red "Unavailable"                (artifacts actually missing)
+    anything else -> muted "Not integrated" (with the reason as tooltip)
     """
-    if status == "downloaded":
-        cls, name = "live", "Cached · downloaded"
+    if status == "live":
+        cls, name = "live", "Live"
+    elif status in ("cached", "downloaded"):
+        cls, name = "cached", "Snapshot"
     elif status == "sampled":
-        cls, name = "cached", "Cached · offline grid"
+        cls, name = "sample", "Snapshot · demo grid"
     elif status == "failed":
-        cls, name = "fail", "Failed"
+        cls, name = "fail", "Unavailable"
     else:
-        cls, name = "off", "Available — not yet integrated"
+        cls, name = "off", "Not integrated"
     tip = f' title="{_html_escape(tooltip)}"' if tooltip else ""
     return (
         f'<span class="oe-pill {cls}"{tip}><span class="dot"></span>{label} — {name}</span>'
@@ -483,13 +488,14 @@ def prediction_header(coord: str, status: str) -> None:
     )
 
 
-def footer_html() -> None:
+def footer_html(fallback: bool = False) -> None:
     st.markdown(
         '<div class="oe-foot">'
         '<b>OceanEmbed</b> · SIH26066 · Space Technology<br>'
-        'Trained on real Argo float profiles collocated to satellite surface fields — '
-        'SSH/SSS may be offline cached demo grids (see sidebar).'
-        '</div>',
+        'Trained on real Argo float profiles collocated to satellite surface fields'
+        + (" · verified offline snapshot in use · live refresh available" if fallback else
+           " · live satellite + Argo feeds connected")
+        + '</div>',
         unsafe_allow_html=True,
     )
 
