@@ -152,7 +152,7 @@ iframe[title="streamlit_folium.st_folium"] {{ border-radius: 18px !important; }}
 .oe-chip:hover {{ transform: translateY(-2px); border-color: rgba(103,232,249,.5);
   box-shadow: 0 10px 24px -14px rgba(34,211,238,.5); }}
 .oe-chip b {{ display:block; font-family:'Outfit'; font-size:1.05rem; color:{CYAN}; }}
-.oe-chip span {{ font-size:.7rem; color:{TEXT_MUTED}; }}
+.oe-chip span {{ font-size:.74rem; color:{TEXT_MUTED}; }}
 
 /*** value bars (surface features) ***/
 .oe-barlist {{ display:flex; flex-direction:column; gap:9px; }}
@@ -175,7 +175,7 @@ iframe[title="streamlit_folium.st_folium"] {{ border-radius: 18px !important; }}
   font-size:1.02rem; display:flex; align-items:center; gap:.45rem; }}
 
 .oe-pill {{ display:inline-flex; align-items:center; gap:.42rem; margin-top:.3rem;
-  border-radius: 999px; padding:.22rem .62rem; font-size:.72rem; font-weight:600; }}
+  border-radius: 999px; padding:.24rem .66rem; font-size:.74rem; font-weight:600; }}
 .oe-pill[title] {{ cursor: help; }}
 .oe-pill.live   {{ color:{GOOD}; background:rgba(52,211,153,.1); border:1px solid rgba(52,211,153,.35); }}
 .oe-pill.cached {{ color:{GOOD}; background:rgba(45,212,191,.09); border:1px solid rgba(45,212,191,.4); }}
@@ -196,7 +196,7 @@ iframe[title="streamlit_folium.st_folium"] {{ border-radius: 18px !important; }}
 
 /*** data legend + banners + demo chips ***/
 .oe-legend {{ display:flex; flex-direction:column; gap:5px; }}
-.oe-leg-row {{ display:flex; align-items:center; gap:.5rem; font-size:.74rem; color:{TEXT_MUTED};
+.oe-leg-row {{ display:flex; align-items:center; gap:.5rem; font-size:.76rem; color:{TEXT_MUTED};
   line-height:1; }}
 .oe-leg-dot {{ width:9px; height:9px; border-radius:50%; flex:none;
   box-shadow:0 0 8px rgba(255,255,255,.22); }}
@@ -285,6 +285,21 @@ def trust_badge(text: str) -> None:
     )
 
 
+def mode_badge(text: str, *, kind: str = "cached", tooltip: str = "") -> None:
+    """Centred data-mode badge shown below the hero.
+
+    ``kind`` maps to a pill style: "cached" (offline grids), "live" (real downloads),
+    or "degraded" (missing artifacts). Tooltip explains what the mode means.
+    """
+    cls = {"cached": "cached", "live": "live", "degraded": "sample"}.get(kind, "cached")
+    tip = f' title="{_html_escape(tooltip)}"' if tooltip else ""
+    st.markdown(
+        f'<div style="text-align:center;margin:.2rem 0 .1rem">'
+        f'<span class="oe-pill {cls}"{tip}><span class="dot"></span>{text}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def anomaly_banner(message: str, kind: str) -> None:
     """Prominent anomaly / all-clear banner above the profile chart.
 
@@ -366,16 +381,16 @@ def glass_panel(html: str, *, animation: bool = True) -> None:
 def source_pill(status: str, label: str, tooltip: str = "") -> str:
     """Status pill for one data source.
 
-    ``downloaded`` -> green "Live · downloaded"   (real data present)
-    ``sampled``    -> green "Cached · offline"    (clearly-labelled demo grid,
+    ``downloaded`` -> green "Cached · downloaded"   (real data stored on disk)
+    ``sampled``    -> teal "Cached · offline grid"  (clearly-labelled demo grid,
                        wired into the model — honest, not a claimed live link)
     ``failed``     -> red "Failed"
     anything else  -> muted "Available — not yet integrated" (with the reason as tooltip)
     """
     if status == "downloaded":
-        cls, name = "live", "Live · downloaded"
+        cls, name = "live", "Cached · downloaded"
     elif status == "sampled":
-        cls, name = "cached", "Cached · offline"
+        cls, name = "cached", "Cached · offline grid"
     elif status == "failed":
         cls, name = "fail", "Failed"
     else:

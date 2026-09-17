@@ -6,10 +6,10 @@ and the collocated Argo profiles (``data/interim/collocated.parquet``). No model
 training and no data downloads happen at runtime.
 
 The app has two views, controlled by ``st.session_state``:
-  * map  — click a location to select it (default)
+  * map  — click a location (ocean pixel / float dot, or manual coordinates) to select it
   * profile — predicted 0-1000 m temperature profile for the clicked point,
-    with a "← Back to map" link and a button that highlights the nearest real
-    Argo float back on the map.
+    with a "← Back to map" link, a CSV download, and a button that highlights the
+    nearest real Argo float back on the map.
 
 Launch:  ``streamlit run app/streamlit_app.py``
 """
@@ -41,8 +41,8 @@ from app.analysis import (
 from app.ui import (
     CYAN, GOOD, HOT, OCEAN, TEAL, TEXT_MUTED, VIOLET, WARM,
     anomaly_banner, depth_chips, feature_bars, footer_html, glass_panel, hero, inject_theme,
-    legend_html, prediction_header, profile_figure_plotly, replay_profile_figure, section,
-    source_card, source_pill, stat_metrics, thermocline_figure, trust_badge, waves,
+    legend_html, mode_badge, prediction_header, profile_figure_plotly, replay_profile_figure,
+    section, source_card, source_pill, stat_metrics, thermocline_figure, trust_badge, waves,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +68,90 @@ def any_sampled_source(cfg: dict) -> bool:
         if status == "sampled":
             return True
     return False
+
+
+def data_mode(cfg: dict) -> tuple[str, str, str]:
+    """Overall data mode for the UI: ("cached"|"live"|"degraded", label, tooltip).
+
+    ``cached``  — SSH/SSS come from the committed offline demo grids (no internet needed).
+    ``live``    — every source reports a real download, all present on disk.
+    ``degraded``— key artifacts are missing and the app cannot predict properly.
+    """
+    try:
+        has_sst = (read_manifest(cfg, "oisst") or {}).get("status") == "downloaded"
+        has_argo = (read_manifest(cfg, "argo") or {}).get("status") == "downloaded"
+    except Exception:
+        has_sst = has_argo = False
+    if any_sampled_source(cfg):
+        return ("cached", "Offline · cached SSH/SSS grids",
+                "Runs fully from cached artifacts — no internet or credentials needed at runtime.")
+    if has_sst and has_argo:
+        return ("live", "Cached · real downloaded data",
+                "All sources downloaded and cached on disk — the app never fetches from the "
+                "internet at runtime.")
+    return ("degraded", "Degraded · check artifacts",
+            "Some source manifests are missing — the app may still predict from whatever is cached.")
+
+
+def region_box(collocated: pd.DataFrame | None, grids: dict[str, pd.DataFrame],
+               cfg: dict) -> dict[str, float]:
+    """Authoritative lon/lat box actually covered by the loaded data.
+
+    Prefers the widest loaded surface grid (that is what bounds prediction), falls
+    back to the collocated Argo box, then to the configured region.
+    """
+    if grids:
+        for feat in ("sst", "ssh", "sss"):
+            g = grids.get(feat)
+            if g is not None and not g.empty and {"lat", "lon"}.issubset(g.columns):
+                return {"west": float(g["lon"].min()), "east": float(g["lon"].max()),
+                        "south": float(g["lat"].min()), "north": float(g["lat"].max())}
+    if collocated is not None and not collocated.empty:
+        return {"west": float(collocated["lon"].min()), "east": float(collocated["lon"].max()),
+                "south": float(collocated["lat"].min()), "north": float(collocated["lat"].max())}
+    return {k: float(v) for k, v in cfg["region"].items()}
+
+
+def in_region(lat: float, lon: float, box: dict[str, float]) -> bool:
+    return box["south"] <= lat <= box["north"] and box["west"] <= lon <= box["east"]
+
+
+def nearest_surface_distance(grid: pd.DataFrame | None, lat: float, lon: float) -> float | None:
+    """Approximate distance (km) to the nearest *valid* cell of a surface grid."""
+    if grid is None or grid.empty:
+        return None
+    val_col = [c for c in grid.columns if c not in ("lon", "lat")]
+    if not val_col:
+        return None
+    cells = grid.dropna(subset=[val_col[0]])
+    if cells.empty:
+        return None
+    from scipy.spatial import cKDTree
+
+    from src.utils.geo import project_xy
+
+    xy = project_xy(cells["lon"].to_numpy(), cells["lat"].to_numpy()).T
+    dists, _ = cKDTree(xy).query(project_xy(lon, lat).reshape(1, 2), k=1)
+    return float(dists[0]) if np.isfinite(dists[0]) else None
+
+
+def jump_to(lat: float, lon: float) -> None:
+    st.session_state.click = {"lat": float(lat), "lng": float(lon)}
+    st.session_state.focus_float = None
+    st.session_state.view = "profile"
+    st.rerun()
+
+
+def manual_coord_entry() -> None:
+    """Low-profile fallback for offline demos where folium/CDN tiles cannot load."""
+    with st.expander("No map? Enter coordinates manually (offline fallback)"):
+        c1, c2, c3 = st.columns([1, 1, 1], gap="small")
+        lat = c1.number_input("Latitude (°N)", -90.0, 90.0, value=13.0, step=0.1,
+                              format="%.3f", key="manual_lat")
+        lon = c2.number_input("Longitude (°E)", -180.0, 180.0, value=75.0, step=0.1,
+                              format="%.3f", key="manual_lon")
+        if c3.button("Predict profile", key="manual_go", use_container_width=True):
+            jump_to(lat, lon)
 
 
 # --------------------------------------------------------------------------- assets
@@ -249,37 +333,33 @@ def linear_baseline(cfg: dict, meta: dict):
 
 
 @st.cache_resource
-def climatology_tables(collocated: pd.DataFrame, targets: list[str]):
+def climatology_tables(_collocated: pd.DataFrame, targets: list[str]):
     """Monthly mean/std of temperature per depth across the collocated profiles."""
-    return monthly_climatology(collocated, targets)
+    return monthly_climatology(_collocated, targets)
 
 
 @st.cache_resource
-def baseline_eval(cfg: dict, meta: dict, mlp, scaler, linear, collocated: pd.DataFrame):
+def baseline_eval(cfg: dict, meta: dict, _mlp, _scaler, _linear, _collocated: pd.DataFrame):
     """RMSE comparison (MLP vs baselines) on the held-out test split, or None."""
     try:
-        return evaluate_baselines(cfg, meta, scaler, mlp, linear=linear, collocated=collocated)
+        return evaluate_baselines(cfg, meta, _scaler, _mlp, linear=_linear, collocated=_collocated)
     except Exception:
         return None
 
 
 @st.cache_resource
-def replay_predictions(cfg: dict, meta: dict, scaler, mlp, lat: float, lon: float):
-    return replay_monthly(cfg, meta, scaler, mlp, lat, lon)
-
-
-def jump_to(lat: float, lon: float) -> None:
-    st.session_state.click = {"lat": float(lat), "lng": float(lon)}
-    st.session_state.focus_float = None
-    st.session_state.view = "profile"
-    st.rerun()
+def replay_predictions(cfg: dict, meta: dict, _scaler, _mlp, lat: float, lon: float):
+    return replay_monthly(cfg, meta, _scaler, _mlp, lat, lon)
 
 
 # --------------------------------------------------------------------------- theme + shell
 inject_theme()
 
 cfg = load_config()
-assets = load_assets(cfg)
+mode_label, mode_kind, mode_tip = data_mode(cfg)
+
+with st.spinner("Loading on-device model and cached data…"):
+    assets = load_assets(cfg)
 meta, mlp, scaler, collocated, grids, missing = (
     assets["meta"], assets["mlp"], assets["scaler"], assets["collocated"], assets["grids"],
     assets["missing"],
@@ -323,6 +403,7 @@ if any_sampled_source(cfg):
     trust_badge("Real Argo floats + NOAA OISST · SSH/SSS offline cached grids")
 else:
     trust_badge("Real Argo floats + NOAA OISST · no synthetic profile data")
+mode_badge(mode_label, kind=mode_kind, tooltip=mode_tip)
 waves("soft")
 
 # --------------------------------------------------------------------------- stats
@@ -356,18 +437,24 @@ with st.sidebar:
     )
     st.caption("Satellite-embedding model · replay · offline demo")
 
+    st.markdown("#### Data mode")
+    st.markdown(
+        f'<div class="oe-source"><div class="row"><b style="font-size:.82rem">'
+        f'{mode_label}</b></div>'
+        f'<span style="font-size:.74rem;color:{TEXT_MUTED}">{mode_tip}</span></div>',
+        unsafe_allow_html=True,
+    )
+
     st.markdown("#### Data sources")
     SOURCE_META = (
         ("argo", "Argo floats",
-         "Real profile archive (GDAC) — downloaded"),
+         "Real profile archive (GDAC) — cached from a previous download"),
         ("oisst", "OISST · sea surface temp",
-         "NOAA daily 0.25° SST — mandatory surface feature"),
+         "NOAA daily 0.25° SST — mandatory surface feature; cached on disk"),
         ("copernicus", "CMEMS · sea surface height",
-         "SSH (m) — wired into the trained model; cached offline grid or live via "
-         "COPERNICUSMARINE_USERNAME / PASSWORD in .env"),
+         "SSH (m) — wired into the trained model; committed offline cached grid"),
         ("smap", "SMAP · sea surface salinity",
-         "SSS (psu) — wired into the trained model; cached offline grid or live via "
-         "NASA_EARTHDATA_USERNAME / PASSWORD in .env"),
+         "SSS (psu) — wired into the trained model; committed offline cached grid"),
     )
     for src, label, tip in SOURCE_META:
         man = read_manifest(cfg, src)
@@ -393,18 +480,16 @@ with st.sidebar:
         if pill_status == "sampled":
             tooltip = ("Cached · offline demo grid — physically-plausible synthetic "
                        "SSH/SSS wired end-to-end into the collocation + trained model. "
-                       "For live data, register (see README), fill .env, re-run "
-                       "`fetch_copernicus` / `fetch_smap` (no --sample), then re-collocate "
-                       "and re-train.")
+                       "No credentials or internet are needed at runtime.")
         elif pill_status == "downloaded" and src == "argo":
             tooltip = (f"{man.get('n_profiles', '?')} profiles · "
                        f"{man.get('n_floats', '?')} floats · real archive")
         elif pill_status == "downloaded" and src == "oisst":
             tooltip = f"{man.get('n_time', '?')} daily frames · real archive"
         elif pill_status == "downloaded" and src == "copernicus":
-            tooltip = f"{man.get('n_time', '?')} time steps · live CMEMS SSH"
+            tooltip = f"{man.get('n_time', '?')} time steps · cached CMEMS SSH"
         elif pill_status == "downloaded" and src == "smap":
-            tooltip = f"{man.get('n_time', '?')} time steps · live SMAP SSS"
+            tooltip = f"{man.get('n_time', '?')} time steps · cached SMAP SSS"
         source_card(label, source_pill(pill_status, label, tooltip), tooltip=tooltip)
 
     st.markdown("#### Model")
@@ -442,22 +527,16 @@ with st.sidebar:
     )
 
     st.markdown("#### About")
-    st.caption("Click anywhere inside the region to predict the subsurface profile. "
-               "All inference is on-device from cached artifacts — no network at runtime.")
+    st.caption("Click an ocean pixel or float dot to predict the subsurface profile, "
+               "or pick a quick-select spot. All inference is on-device from cached "
+               "artifacts — no network at runtime.")
 
 
 # --------------------------------------------------------------------------- map view
 def render_map() -> None:
     # derive the region box from the *loaded* data so the rectangle always matches it
-    if collocated is not None and not collocated.empty:
-        region = {
-            "west": float(collocated["lon"].min()) - 0.5,
-            "east": float(collocated["lon"].max()) + 0.5,
-            "south": float(collocated["lat"].min()) - 0.5,
-            "north": float(collocated["lat"].max()) + 0.5,
-        }
-    else:
-        region = cfg["region"]
+    base = region_box(collocated, grids, cfg)
+    region = {k: (v - 0.5 if k in ("west", "south") else v + 0.5) for k, v in base.items()}
 
     waves("faint")
     section("Collocated Argo network · sea-surface temperature",
@@ -467,64 +546,81 @@ def render_map() -> None:
     selected_spot = st.pills("Demo locations", spot_keys, key="demo_spot",
                              selection_mode="single", default=None)
     if selected_spot:
+        # consume the selection so returning to the map does not re-trigger the jump
+        st.session_state.pop("demo_spot", None)
         if selected_spot == "🎲 Surprise me":
-            row = collocated.sample(1).iloc[0]
-            jump_to(float(row["lat"]), float(row["lon"]))
+            if collocated is not None and not collocated.empty:
+                row = collocated.sample(1).iloc[0]
+                jump_to(float(row["lat"]), float(row["lon"]))
+            else:
+                st.info("No collocated profiles cached — pick one of the fixed spots instead.")
         else:
             spot = DEMO_SPOTS[selected_spot]
             jump_to(spot["lat"], spot["lng"])
-    st.caption("Quick-select an Argo-dense hotspot, or click anywhere on the map below. "
-               "🎲 picks a random real float location.")
+    st.caption("Quick-select an Argo-dense hotspot, click any ocean pixel or float dot on "
+               "the map, or use the manual-coordinates fallback below. 🎲 picks a random "
+               "real float location.")
 
     focus = st.session_state.get("focus_float")
     center = ((focus or {}).get("lat"), (focus or {}).get("lon")) if focus else None
-    m = folium.Map(
-        location=[center[0], center[1]] if center else [
-            (region["south"] + region["north"]) / 2, (region["west"] + region["east"]) / 2,
-        ],
-        zoom_start=8 if focus else 5,
-        tiles="OpenStreetMap",
-        control_scale=True,
-    )
-    folium.Rectangle(
-        bounds=[[region["south"], region["west"]], [region["north"], region["east"]]],
-        color="#2ca02c", weight=1, fill=False, popup="study region",
-    ).add_to(m)
-
-    if collocated is not None and not collocated.empty:
-        fg = folium.FeatureGroup(name="Argo collocated profiles")
-        sample = collocated.sample(min(400, len(collocated)), random_state=1) if len(collocated) > 400 else collocated
-        for _, r in sample.iterrows():
-            latv, lonv = float(r["lat"]), float(r["lon"])
-            date = pd.Timestamp(r["time"]).date()
-            tip_txt = f"SST {r['sst']:.1f}°C · float {r['float_id']} · {date}"
-            fg.add_child(folium.CircleMarker(
-                [latv, lonv], radius=1.8,
-                color=sst_color(float(r["sst"])), fill=True, fill_opacity=0.85,
-                popup=folium.Popup(tip_txt, max_width=240),
-                tooltip=folium.Tooltip(tip_txt, sticky=True),
-            ))
-        fg.add_to(m)
-
-    if focus:
-        fm = folium.CircleMarker(
-            [float(focus["lat"]), float(focus["lon"])], radius=8,
-            color=GOOD, fill=True, fill_opacity=0.6, weight=3,
-            popup=f"Selected Argo float {focus.get('float_id', '')}",
-            tooltip=folium.Tooltip(f"Float {focus.get('float_id', '')}", sticky=True),
+    try:
+        m = folium.Map(
+            location=[center[0], center[1]] if center else [
+                (region["south"] + region["north"]) / 2,
+                (region["west"] + region["east"]) / 2,
+            ],
+            zoom_start=8 if focus else 5,
+            tiles="OpenStreetMap",
+            control_scale=True,
         )
-        fm.add_to(m)
+        folium.Rectangle(
+            bounds=[[region["south"], region["west"]], [region["north"], region["east"]]],
+            color="#2ca02c", weight=1, fill=False, popup="study region",
+        ).add_to(m)
 
-    folium.LayerControl(collapsed=True).add_to(m)
+        if collocated is not None and not collocated.empty:
+            fg = folium.FeatureGroup(name="Argo collocated profiles")
+            sample = collocated.sample(min(400, len(collocated)), random_state=1) \
+                if len(collocated) > 400 else collocated
+            for _, r in sample.iterrows():
+                latv, lonv = float(r["lat"]), float(r["lon"])
+                date = pd.Timestamp(r["time"]).date()
+                tip_txt = f"SST {r['sst']:.1f}°C · float {r['float_id']} · {date}"
+                fg.add_child(folium.CircleMarker(
+                    [latv, lonv], radius=2.6,
+                    color=sst_color(float(r["sst"])), fill=True, fill_opacity=0.9,
+                    popup=folium.Popup(tip_txt, max_width=240),
+                    tooltip=folium.Tooltip(tip_txt, sticky=True),
+                ))
+            fg.add_to(m)
 
-    result = st_folium(m, width="100%", height=500, returned_objects=["last_clicked"])
+        if focus:
+            fm = folium.CircleMarker(
+                [float(focus["lat"]), float(focus["lon"])], radius=8,
+                color=GOOD, fill=True, fill_opacity=0.6, weight=3,
+                popup=f"Selected Argo float {focus.get('float_id', '')}",
+                tooltip=folium.Tooltip(f"Float {focus.get('float_id', '')}", sticky=True),
+            )
+            fm.add_to(m)
+
+        folium.LayerControl(collapsed=True).add_to(m)
+        result = st_folium(m, width="100%", height=500,
+                           returned_objects=["last_clicked"], key="ocean_map")
+        st.caption("Click anywhere on the map to predict the 0–1000 m temperature profile at "
+                   "that point. Basemap tiles load from the internet — if they do not appear, "
+                   "use the manual-coordinates fallback below.")
+    except Exception as e:  # pragma: no cover — offline/degraded browser rendering
+        st.error("The interactive map could not be rendered — use the manual-coordinates "
+                 "fallback below to still predict a profile.")
+        result = {}
     clicked = result.get("last_clicked") if isinstance(result, dict) else None
-    st.caption("Click anywhere on the map to predict the 0–1000 m temperature profile at that point.")
     if clicked and clicked.get("lat") is not None:
         st.session_state.click = {"lat": float(clicked["lat"]), "lng": float(clicked["lng"])}
         st.session_state.focus_float = None
         st.session_state.view = "profile"
         st.rerun()
+
+    manual_coord_entry()
 
 
 # --------------------------------------------------------------------------- profile view
@@ -543,16 +639,39 @@ def render_profile() -> None:
         st.rerun()
     prediction_header(f"{lat:.2f}°N · {lon:.2f}°E", status="on-device inference")
 
+    box = region_box(collocated, grids, cfg)
+    outside = not in_region(lat, lon, box)
+
     ref_time = collocated["time"].max() if collocated is not None else None
     with st.spinner("Reconstructing the 0–1000 m profile from surface features…"):
         X, used = build_features(meta, grids, lat, lon, ref_time=ref_time)
         if X is None:
-            st.error("Not enough cached surface grids to assemble all required features.")
-            st.caption("If ssh/sss features are missing, run the ingestion + collocation "
-                       "pipeline (or provide credentials for the live sources).")
+            if outside:
+                st.error(f"This point ({lat:.2f}°N, {lon:.2f}°E) lies outside the mapped "
+                         f"region ({box['south']:.1f}–{box['north']:.1f}°N, "
+                         f"{box['west']:.1f}–{box['east']:.1f}°E).")
+                st.caption("Click inside the region, pick a quick-select spot above, or "
+                           "enter ocean coordinates below.")
+            else:
+                st.error("No prediction is possible at this point — it is on land or in an "
+                         "area the cached satellite grids do not cover.")
+                st.caption("Try clicking an ocean pixel on the map, picking a quick-select "
+                           "spot, or entering ocean coordinates below.")
+            manual_coord_entry()
             return
         Xarr = X.to_numpy()
         pred = mlp_predict(meta, scaler, mlp, Xarr)[0]
+
+        edge_note: list[str] = []
+        if outside:
+            edge_note.append("just outside the mapped region")
+        d0 = nearest_surface_distance(grids.get("sst"), lat, lon)
+        if d0 is not None and d0 > 40.0:
+            edge_note.append(f"~{d0:.0f} km from the nearest valid ocean pixel "
+                             f"(land / masked coastline)")
+        if edge_note:
+            st.caption("Note: this point lies " + " · ".join(edge_note) +
+                       " — the profile uses the closest valid surface values.")
 
         actual = None
         argo_row = None
@@ -625,6 +744,28 @@ def render_profile() -> None:
             st.markdown("**RMSE vs held-out real Argo profiles** *(test split)*")
             st.dataframe(rmse, use_container_width=True, height=220)
 
+        csv_cols: dict[str, np.ndarray] = {
+            "Depth (m)": depths,
+            "OceanEmbed MLP (°C)": pred,
+            "Argo nearby ±1σ (°C)": band if band is not None else np.full_like(pred, np.nan),
+            "Argo actual (°C)": actual if actual is not None else np.full_like(pred, np.nan),
+            "Climatology (°C)": next((b["values"] for b in baseline_lines
+                                      if b["name"] == BASELINE_CLIM),
+                                     np.full_like(pred, np.nan)),
+            "Linear regression (°C)": next((b["values"] for b in baseline_lines
+                                            if b["name"] == BASELINE_LINEAR),
+                                           np.full_like(pred, np.nan)),
+        }
+        dl_df = pd.DataFrame(csv_cols)
+        dl_df.insert(0, "Latitude (°N)", float(lat))
+        dl_df.insert(1, "Longitude (°E)", float(lon))
+        st.download_button(
+            "⬇ Download profile (CSV)",
+            data=dl_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"oceanembed_profile_{lat:.2f}N_{lon:.2f}E.csv",
+            mime="text/csv", key="dl_profile_csv",
+        )
+
     with col_side:
         side_html = f"{depth_chips([int(l) for l in depths], pred)}"
         if argo_row is not None:
@@ -634,6 +775,12 @@ def render_profile() -> None:
             side_html += (
                 f'<p style="margin:.7rem 0 0;font-size:.78rem;color:{TEXT_MUTED}">'
                 f'<span style="color:{GOOD}">◈</span> {argo_note}</p>'
+            )
+        else:
+            side_html += (
+                f'<p style="margin:.7rem 0 0;font-size:.78rem;color:{TEXT_MUTED}">'
+                'No real Argo profile within ~1.5° of this point — the profile is an '
+                'extrapolation from the nearest surrounding floats.</p>'
             )
         if used:
             bars = "".join(
@@ -667,7 +814,8 @@ def render_profile() -> None:
     st.markdown('<div style="margin-top:.6rem"></div>')
     section(f"Monthly replay — how the profile changes over time",
             meta="last available months · on-device")
-    rep = replay_predictions(cfg, meta, scaler, mlp, lat, lon)
+    with st.spinner("Replaying monthly profiles from the cached satellite series…"):
+        rep = replay_predictions(cfg, meta, scaler, mlp, lat, lon)
     if rep is None:
         st.info("No cached monthly satellite series for this point — replay unavailable "
                 "(needs the cached OISST/CMEMS/SMAP grids in `data/cached/`).")
