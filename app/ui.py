@@ -398,7 +398,7 @@ def source_pill(status: str, tooltip: str = "") -> str:
     ``live``      -> green pulsing "Live"            (fetched from the feed this session)
     ``cached``    -> neutral blue "Snapshot"          (verified offline snapshot; refresh available)
     ``downloaded``-> neutral blue "Snapshot"          (committed real download, no live fetch)
-    ``sampled``   -> amber "Snapshot · demo grid"     (clearly-labelled committed demo grid)
+    ``sampled``   -> amber "Demo grid"                    (clearly-labelled committed demo grid)
     ``failed``    -> red "Unavailable"                (artifacts actually missing)
     anything else -> muted "Not integrated" (with the reason as tooltip)
     """
@@ -407,7 +407,7 @@ def source_pill(status: str, tooltip: str = "") -> str:
     elif status in ("cached", "downloaded"):
         cls, name = "cached", "Snapshot"
     elif status == "sampled":
-        cls, name = "sample", "Snapshot · demo grid"
+        cls, name = "sample", "Demo grid"
     elif status == "failed":
         cls, name = "fail", "Unavailable"
     else:

@@ -496,9 +496,7 @@ def build_live_state(cfg: dict, now: dt.datetime | None = None,
     def _copernicus():
         p = refresh_copernicus(cfg, live_dir, start, end)
         if p is None:
-            raise RuntimeError(
-                "live CMEMS needs Copernicus Marine credentials "
-                "(COPERNICUSMARINE_USERNAME/PASSWORD) in .env / Streamlit secrets")
+            raise RuntimeError("live CMEMS needs Copernicus Marine credentials")
         var = cfg["ingestion"]["copernicus"]["variable"]
         return {"ssh": build_live_grid(p, var, "ssh"),
                 "vintage": _netcdf_vintage(p, var), "path": p}
@@ -506,9 +504,7 @@ def build_live_state(cfg: dict, now: dt.datetime | None = None,
     def _smap():
         p = refresh_smap(cfg, live_dir, start, end)
         if p is None:
-            raise RuntimeError(
-                "live SMAP needs NASA Earthdata credentials "
-                "(NASA_EARTHDATA_USERNAME/PASSWORD) in .env / Streamlit secrets")
+            raise RuntimeError("live SMAP needs NASA/PODAAC credentials")
         var = cfg["ingestion"]["smap"]["variable"]
         return {"sss": build_live_grid(p, var, "sss"),
                 "vintage": _netcdf_vintage(p, var), "path": p}

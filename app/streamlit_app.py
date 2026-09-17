@@ -147,8 +147,9 @@ def source_state(src: str, live_state, cfg: dict) -> tuple[str, str]:
                        "Restore it (e.g. `git restore`) or re-run `fetch_* --sample` to "
                        "regenerate an offline snapshot.")
     if pill_status == "sampled":
-        tooltip = ("Committed offline demo grid — a quiet snapshot in use until the "
-                   "live CMEMS/SMAP feed is connected (needs credentials).")
+        tooltip = {"copernicus": "Demo grid — needs free CMEMS credentials to go live.",
+                   "smap": "Demo grid — needs free PODAAC credentials to go live.",
+                   }.get(src, "Committed offline demo grid.")
     elif pill_status == "downloaded" and src == "argo":
         tooltip = (f"{man.get('n_profiles', '?')} profiles · "
                    f"{man.get('n_floats', '?')} floats · verified offline snapshot")
