@@ -9,8 +9,9 @@ being used as a fallback).
 Modes per source
 ----------------
 * ``argo``    — live via the Argovis HTTPS API (no login) / argopy GDAC when reachable.
-* ``oisst``   — live via NOAA ERDDAP ``ncdcOisst21Agg`` (no login), trying the mirror
-  list in ``config.yaml`` (coastwatch, upwell) so a blocked host is not fatal.
+* ``oisst``   — live via NOAA ERDDAP griddap (no login): the NRT product first
+  (current to ~1-2 days), then the Final product; each mirror is probed first so a
+  blocked host can never stall the pass.
 * ``copernicus`` (SSH) — live only when Copernicus Marine credentials exist
   (``COPERNICUSMARINE_USERNAME/PASSWORD``); otherwise cached.
 * ``smap``    (SSS) — live only when NASA Earthdata credentials exist
@@ -103,14 +104,75 @@ def _run_with_timeout(fn, timeout_s: int, *args, **kwargs):
 
 # --------------------------------------------------------------------------- OISST (SST)
 def _oisst_mirrors(cfg: dict) -> list[str]:
+    """OISST ERDDAP griddap bases, tried in order (NRT first, then Final product).
+
+    NCEI is deliberately absent: its public ERDDAP does not host these gridded ids
+    (``info NCEI griddap/ncdcOisst21Agg`` is a 404), and upwell transparently
+    redirects griddap *data* to coastwatch, so the direct coastwatch entries give
+    every network its best chance.
+    """
     default = [
+        "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21NrtAgg.nc",
+        "https://upwell.pfeg.noaa.gov/erddap/griddap/ncdcOisst21NrtAgg.nc",
         "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc",
         "https://upwell.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc",
-        "https://www.ncei.noaa.gov/erddap/griddap/ncdcOisst21Agg.nc",
     ]
     cfgd = cfg.get("ingestion", {}).get("oisst", {}).get("mirrors")
     cfgd = [m.rstrip("/") for m in cfgd] if cfgd else []
     return cfgd or default
+
+
+def _erddap_info_url(base: str) -> str:
+    """The cheap ``/erddap/info/<dataset>/index.json`` probe URL for a griddap base.
+
+    e.g. ``.../griddap/ncdcOisst21NrtAgg.nc`` -> ``.../info/ncdcOisst21NrtAgg/index.json``
+    """
+    dsid = base.rstrip("/").rsplit("/", 1)[-1].removesuffix(".nc")
+    host = base.rstrip("/").rsplit("/erddap/", 1)[0] + "/erddap"
+    return f"{host}/info/{dsid}/index.json"
+
+
+def _probe_erddap_coverage(base: str, timeout=_PROBE_TIMEOUT_S) -> tuple[str | None, str]:
+    """Fast reachability + coverage check for one ERDDAP mirror before the big download.
+
+    Returns ``(coverage_end_iso, descriptor)`` where ``coverage_end_iso`` is the
+    dataset's ``time_coverage_end`` (YYYY-MM-DD) or None when unknown, and
+    ``descriptor`` is a short human reason for refusal/absence ("unreachable",
+    "404 dataset not hosted", "no coverage attr", etc.).
+    """
+    info = _erddap_info_url(base)
+    try:
+        with requests.get(info, timeout=timeout,
+                          headers={"Accept-Encoding": "identity"}) as r:
+            if r.status_code == 404:
+                return None, "dataset not hosted (404)"
+            if r.status_code >= 500:
+                return None, f"server error {r.status_code}"
+            if r.status_code != 200:
+                return None, f"http {r.status_code}"
+            payload = r.json()
+    except requests.exceptions.ConnectTimeout:
+        return None, "unreachable (connect timeout)"
+    except requests.exceptions.Timeout:
+        return None, "unreachable (timeout)"
+    except requests.exceptions.ConnectionError:
+        return None, "unreachable (connection failed)"
+    except ValueError:
+        return None, "bad info response"
+    except Exception:  # noqa: BLE001
+        return None, "unreachable (probe error)"
+    end = None
+    for row in payload.get("table", {}).get("rows", []):
+        if len(row) >= 5 and row[0] == "attribute" and row[1] == "NC_GLOBAL" \
+                and row[2] == "time_coverage_end":
+            # Layout: [..., 'Data Type', 'Value'] (post-ERDDAP 2.x) or older
+            # [..., 'Value', 'Data Type']. Pick whichever cell looks like a date.
+            end = next((c for c in (row[4], row[3]) if str(c).count("-") >= 2), None)
+            if end:
+                break
+    if not end:
+        return None, "no coverage attribute"
+    return str(end)[:10], "ok"
 
 
 def build_erddap_url(cfg: dict, base: str, start: str, end: str) -> str:
@@ -142,15 +204,30 @@ def refresh_oisst(cfg: dict, live_dir: Path, start: str, end: str,
                   timeout: int = _DOWNLOAD_TIMEOUT_S) -> Path | None:
     """Download the rolling OISST window to ``live_dir/oisst_sst.nc``.
 
-    Tries each configured mirror until one succeeds; returns the archive path or None.
+    Each mirror is first probed with its cheap ``info`` JSON (fast fail on down /
+    absent hosts, and to read ``time_coverage_end``), then the request's ``end`` is
+    clamped to that coverage so a current NRT product always resolves inside its own
+    time axis. Tries every mirror and keeps a distinct reason for each; the final
+    error is a one-line summary the side panel can show honestly.
     """
     var = cfg["ingestion"]["oisst"]["variable"]
     dest = live_dir / "oisst_sst.nc"
-    last_err: Exception | None = None
+    reasons: list[str] = []
     for base in _oisst_mirrors(cfg):
+        rest = base.rstrip("/").rsplit("/erddap/", 1)[-1]  # griddap/<dsid>.nc
+        host = base.rstrip("/").rsplit("/erddap/", 1)[0].split("//")[-1]
+        label = f"{host} {rest.removeprefix('griddap/').removesuffix('.nc')}"
+        cov_end, why = _probe_erddap_coverage(base)
+        if cov_end is None:
+            reasons.append(f"{label}: {why}")
+            continue
+        mirror_end = min(end, cov_end)
+        if mirror_end < start:
+            reasons.append(f"{label}: ends {cov_end}")
+            continue
         tmp = dest.with_suffix(".nc.part")
         try:
-            _download_stream(build_erddap_url(cfg, base, start, end), tmp, timeout)
+            _download_stream(build_erddap_url(cfg, base, start, mirror_end), tmp, timeout)
             with xr.open_dataset(tmp) as ds:
                 if var not in ds or int(ds[var]["time"].size) < 30:
                     raise ValueError("archive too small / variable missing")
@@ -159,10 +236,13 @@ def refresh_oisst(cfg: dict, live_dir: Path, start: str, end: str,
             tmp.replace(dest)
             return dest
         except Exception as exc:  # noqa: BLE001
-            last_err = exc
+            reasons.append(f"{label}: {type(exc).__name__}")
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
-    raise RuntimeError(f"OISST live fetch failed on all mirrors: {last_err}")
+    summary = "; ".join(reasons)
+    if len(summary) > 220:
+        summary = summary[:217] + "…"
+    raise RuntimeError(f"OISST live unavailable — {summary}")
 
 
 # --------------------------------------------------------------------------- Argo
@@ -416,7 +496,9 @@ def build_live_state(cfg: dict, now: dt.datetime | None = None,
     def _copernicus():
         p = refresh_copernicus(cfg, live_dir, start, end)
         if p is None:
-            raise RuntimeError("credentials absent or live fetch declined")
+            raise RuntimeError(
+                "live CMEMS needs Copernicus Marine credentials "
+                "(COPERNICUSMARINE_USERNAME/PASSWORD) in .env / Streamlit secrets")
         var = cfg["ingestion"]["copernicus"]["variable"]
         return {"ssh": build_live_grid(p, var, "ssh"),
                 "vintage": _netcdf_vintage(p, var), "path": p}
@@ -424,7 +506,9 @@ def build_live_state(cfg: dict, now: dt.datetime | None = None,
     def _smap():
         p = refresh_smap(cfg, live_dir, start, end)
         if p is None:
-            raise RuntimeError("credentials absent or live fetch declined")
+            raise RuntimeError(
+                "live SMAP needs NASA Earthdata credentials "
+                "(NASA_EARTHDATA_USERNAME/PASSWORD) in .env / Streamlit secrets")
         var = cfg["ingestion"]["smap"]["variable"]
         return {"sss": build_live_grid(p, var, "sss"),
                 "vintage": _netcdf_vintage(p, var), "path": p}

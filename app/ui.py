@@ -231,6 +231,17 @@ iframe[title="streamlit_folium.st_folium"] {{ border-radius: 18px !important; }}
 .stButton > button:hover {{ background:rgba(34,211,238,.18); border-color:{CYAN};
   box-shadow: 0 8px 24px -10px {CYAN}; transform: translateY(-1px); }}
 
+/*** big "Back to map" primary button (and any other primary CTA) ***/
+.stButton button[kind="primary"],
+[data-testid="stBaseButton-primary"] {{
+  padding: .6rem 1.35rem; font-size: 1.04rem; font-weight: 700;
+  border-radius: 14px; letter-spacing: .01em; line-height: 1.2;
+}}
+
+/*** blinking/fading playback indicator (replay month badge while playing) ***/
+.oe-blink {{ animation: oeFade 0.9s ease-in-out infinite; }}
+@keyframes oeFade {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: .12; }} }}
+
 [data-testid="stStatusWidget"] {{ background: rgba(13,32,54,.6); border:1px solid {BORDER};
   border-radius: 12px; backdrop-filter: blur(8px); }}
 
@@ -380,8 +391,9 @@ def glass_panel(html: str, *, animation: bool = True) -> None:
 
 
 # --------------------------------------------------------------------------- sidebar
-def source_pill(status: str, label: str, tooltip: str = "") -> str:
-    """Status pill for one data source.
+def source_pill(status: str, tooltip: str = "") -> str:
+    """Status pill for one data source (renders the status alone; the adjacent
+    ``source_card`` already carries the source label so nothing is duplicated).
 
     ``live``      -> green pulsing "Live"            (fetched from the feed this session)
     ``cached``    -> neutral blue "Snapshot"          (verified offline snapshot; refresh available)
@@ -402,7 +414,7 @@ def source_pill(status: str, label: str, tooltip: str = "") -> str:
         cls, name = "off", "Not integrated"
     tip = f' title="{_html_escape(tooltip)}"' if tooltip else ""
     return (
-        f'<span class="oe-pill {cls}"{tip}><span class="dot"></span>{label} — {name}</span>'
+        f'<span class="oe-pill {cls}"{tip}><span class="dot"></span>{name}</span>'
     )
 
 

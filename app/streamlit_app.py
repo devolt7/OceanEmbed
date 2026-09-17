@@ -569,7 +569,7 @@ with st.sidebar:
     )
     for src, label, tip in SOURCE_META:
         pill_status, tooltip = source_state(src, live_state, cfg)
-        source_card(label, source_pill(pill_status, label, tooltip), tooltip=tooltip)
+        source_card(label, source_pill(pill_status, tooltip), tooltip=tooltip)
 
     st.markdown("#### Model")
     if mlp is not None and meta:
@@ -711,7 +711,8 @@ def render_profile() -> None:
     lat, lon = float(click["lat"]), float(click["lng"])
 
     waves("faint")
-    if st.button("← Back to map", key="back_to_map"):
+    if st.button("← Back to map", key="back_to_map",
+                 type="primary", use_container_width=True):
         st.session_state.click = None
         st.session_state.focus_float = None
         st.session_state.view = "map"
@@ -890,7 +891,6 @@ def render_profile() -> None:
         st.session_state.replay_point = pt
         st.session_state.replay_playing = False
 
-    st.markdown('<div style="margin-top:.6rem"></div>')
     replay_txt = ("Replaying monthly profiles from the live satellite series…"
                   if replay_archive_dir else
                   "Replaying monthly profiles from the offline snapshot…")
@@ -927,7 +927,7 @@ def render_profile() -> None:
 
         ctrl_a, ctrl_b, ctrl_c = st.columns([1, 3, 3], gap="small")
         with ctrl_a:
-            if st.button(("⏸ Pause" if playing else "▶ Play"),
+            if st.button(("⏹ Stop" if playing else "▶ Play"),
                          key="replay_toggle", use_container_width=True):
                 if playing:
                     st.session_state.replay_was_paused = True
@@ -937,9 +937,11 @@ def render_profile() -> None:
             st.slider("Month", 0, n_mon - 1, key="replay_slider")
         with ctrl_c:
             replay_idx = int(st.session_state.replay_slider)
+            _blink = ' class="oe-blink"' if playing else ""
             st.markdown(
-                f'<div style="display:flex;align-items:center;height:100%;font-size:.88rem;'
-                f'color:{CYAN};font-weight:600">{pd.Timestamp(months[replay_idx]).strftime("%b %Y")}</div>',
+                f'<div{_blink} style="display:flex;align-items:center;height:100%;font-size:.88rem;'
+                f'color:{CYAN};font-weight:600">{pd.Timestamp(months[replay_idx]).strftime("%b %Y")}'
+                f'{" · playing" if playing else ""}</div>',
                 unsafe_allow_html=True,
             )
 
